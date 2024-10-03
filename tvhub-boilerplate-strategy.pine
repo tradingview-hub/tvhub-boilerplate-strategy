@@ -1,0 +1,484 @@
+//=============================================================================//
+// www.tv-hub.org - Boilerplate / Template Strategy
+// Version: 1.0
+
+// Description: This is a boilerplate strategy for TradingView PineScript developers
+// to connect their strategies with the TV-Hub trading platform. The script provides 
+// a customizable input settings system that generates trade commands to be executed
+// via automated alerts. Developers could use the entire section (or parts of it)
+// between the code comments "Tv-Hub Input Settings" and "End TV-Hub Input Settings"
+
+// To use the trade commands in your alerts, set the following placeholder
+// in the alert message window on TradingView: {{strategy.order.alert_message}}
+
+// Remark: The actual strategy "Parabolic SAR + Regression Channels + Supertrend" 
+// is just for demonstration purpose.
+
+// License: MIT License at https://opensource.org/licenses/MIT
+//=============================================================================//
+
+//@version=5
+strategy("[tv-hub.org] Boilerplate / Template Strategy based on: Parabolic SAR + Regression Channels + Supertrend", shorttitle="TV-Hub Boilerplate / Template Strategy", overlay=true, max_bars_back=1000, max_lines_count=500, calc_on_every_tick = true)
+
+//==========================================================================//
+//======================= TV-Hub Input Settings ============================//
+//==========================================================================//
+
+// Strategy Settings
+pair_cur = syminfo.ticker // Fetches the current asset symbol (e.g., BTCUSDT)
+exchange = syminfo.prefix // Gets the exchange prefix (e.g., Binance, Bybit)
+price = math.round_to_mintick(close) // Rounds the close price to nearest tick value
+
+//==== Basic Settings ==========
+// These are the key connection settings required for the strategy to communicate 
+// with the TV-Hub platform via webhooks. Traders need to set their API details 
+// to enable automated trade execution.
+
+token = input.string("", '⚙️ Access-Key', group="𝙒𝙚𝙗𝙝𝙤𝙤𝙠 𝙏𝙫-𝙃𝙪𝙗 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨", tooltip="Enter your Tv-Hub Access-Key")
+apiName = input.string("", "⚙️  API Key Name", group="𝙒𝙚𝙗𝙝𝙤𝙤𝙠 𝙏𝙫-𝙃𝙪𝙗 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨", tooltip="Enter your API key name")
+exchangeName = input.string("Bybit", "⚙️ Exchange", options=["Bybit", "Bybit-Testnet", "Binance", "Binance-Futures", "Binance-Futures-Testnet", "Bitmex", "Bitmex-Testnet", "OKX"], group="𝙒𝙚𝙗𝙝𝙤𝙤𝙠 𝙏𝙫-𝙃𝙪𝙗 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨", tooltip="Select Exchange")
+
+// ================ Order Type Settings ===============
+
+orderType = input.string("Market", "⚙️ Order-Type", options=["Market", "Limit"], group="Order Type 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨", tooltip="Select the order type. 'Market' orders are executed immediately at the current market price, while 'Limit' orders are placed at a specified price or better.")
+enableBestPrice = input.bool(true, "Use best price (Best Bid/Ask)", inline="121", tooltip="When using limit orders, enabling this option allows TV-Hub to place the order at the current best bid or ask price. If this option is not active, the strategy will set the entry price instead.", group="Order Type 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+enableOrderChasing = input.bool(false, "Enable order chasing", inline="122", tooltip="When limit orders and ‘Use best price’ are enabled, you can activate order chasing. With each update step, TV-Hub will place the order at the current best price from the order book. By default, updates occur every 20 seconds, up to 180 times. You can adjust this interval from 1 to 300 seconds. Note: The total number of updates remains constant, so shorter intervals result in a shorter chasing period (e.g., a 1-second interval gives 3 minutes of chasing). Be cautious of rate limiting when using low intervals, as exchanges may impose restrictions. If the order is not filled within the chasing period, it will be executed as a market order.", group="Order Type 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+orderChasingInterval = input.float(title="", step=1, defval=20, minval=1, inline="122", group="Order Type 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+setOrderType = ',"isMarket":true'
+
+if (orderType == "Limit")
+    // Set the order type to limit if the user selects "Limit" in the settings
+    setOrderType := ',"isLimit":true'
+
+    // Check if "Use Best Price" is enabled
+    if enableBestPrice
+        // If enabled, set the limit price type to "bestPrice" which means TV-Hub will use the current best bid/ask
+        setOrderType += ',"limitPriceType":"bestPrice"'
+
+        // If order chasing is enabled, update the order every x seconds and switch to a market order if not filled
+        if enableOrderChasing
+            // You can remove the option "updateLimitOrderBuyMarketAfterNotFilled":true if you want the order to be canceled after chasing
+            setOrderType += ',"chaseLimitOrder":true,"updateLimitOrderBuyMarketAfterNotFilled":true,"updateLimitOrderTimeInterval":' + str.tostring(orderChasingInterval)
+    else
+        // If "Best Price" is not enabled, the strategy must set a specific limit price.
+        // In this case, the limit price is set to the close price, but strategy developers can use their own custom logic here.
+        setOrderType += ',"limitPriceType":"fixedPrice","price":' + str.tostring(close, format.mintick) 
+
+// ============== Risk Management Settings===============
+// These settings govern how position sizing is determined, including
+// whether to use fixed sizes or percentages based on available wallet 
+// funds. Users can also define the type of margin and leverage for each trade.
+
+unitsType = input.string("Use Fixed Size (USD)", "⚙️ Units Type", options=["Use Fixed Size (USD)", "Use Absolute Value (BTC, ETH)", "Use Percent (Available)", "Use Percent (Wallet)", "Risk"], group="𝙍𝙞𝙨𝙠 𝙈𝙖𝙣𝙖𝙜𝙚𝙢𝙚𝙣𝙩", tooltip="Select the units type. Then, use the field below to set the trade size based on the chosen units type.")
+units = input.float(10.00, step=1, title="⚙️ Position Size", tooltip="Set your position size based on the selected units type. For ‘Use Fixed Size’, enter the size in the quote asset (e.g., USDT). For ‘Use Absolute Value’, enter the size in the base asset (e.g., BTC, ETH). For all other options, enter a percentage value.", group="𝙍𝙞𝙨𝙠 𝙈𝙖𝙣𝙖𝙜𝙚𝙢𝙚𝙣𝙩")
+Currency = syminfo.basecurrency + syminfo.currency
+margin = input.string("CROSSED", "⚙️ Margin Type  ", options=["CROSSED", "ISOLATED"], group="𝙍𝙞𝙨𝙠 𝙈𝙖𝙣𝙖𝙜𝙚𝙢𝙚𝙣𝙩")
+Leverage = input.float(title="⚙️ Leverage ", step=1, defval=10, maxval=125, minval=1, group="𝙍𝙞𝙨𝙠 𝙈𝙖𝙣𝙖𝙜𝙚𝙢𝙚𝙣𝙩")
+
+unitsTypeValue = "absolute"
+if (unitsType == "Use Percent (Available)")
+    unitsTypeValue := "percentBalance"
+if (unitsType == "Use Percent (Wallet)")
+    unitsTypeValue := "percentWallet"
+if (unitsType == "Risk")
+    unitsTypeValue := "risk"
+
+unitsTypeKey = unitsTypeValue == "absolute" ? 'units' : 'unitsPercent'
+
+fixedprice = unitsType == "Use Fixed Size (USD)" ? ',"useFixedSize":true,"fixedQuoteSize":"' + str.tostring(units) + '"' : na
+if (unitsType == "Use Fixed Size (USD)")
+    unitsTypeKey := "fixedQuoteSize"
+
+// ================ Take Profit Settings ===============
+// These settings allow users to define the target take profit and stop loss
+// percentages for their trades. Multiple levels of take profits can be defined 
+// with distribution sizing, while stop loss ensures risk is managed.
+
+takeProfitType = input.string("Percent", "⚙️ Take-Profit Type", options=["Percent", "Absolute"], group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨", tooltip="Select the take-profit type. 'Percent' means each target is calculated as a percentage of the entry price, while 'Absolute' requires manually calculated target prices in absolute values to be provided by the strategy.")
+enableTakeProfit = input.bool(true, "Enable Take Profit", inline="221", tooltip="Enable take profit. If ‘Percent’ is selected as the take-profit type, you must provide the percentage distance between each take-profit (TP) step. If ‘Absolute’ is selected, this field can be left empty, and the strategy will calculate the target prices at runtime.", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+takeProfitDistance = input.float(title="", step=0.1, defval=0.3, minval=0.01, inline="221", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+targetAmountInPercent = input.bool(true, "Distribution Size", inline="333", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+sizePerTarget = input.float(90, minval=1, maxval=100, title="", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨", inline="333", tooltip="Set the size distribution in percent for each take profit (TP). The total size across all enabled TPs should not exceed 100%. For example, if 2 TPs are enabled, set 50% for each (TP1 = 50%, TP2 = 50%) to equal 100%.")
+
+TP1 = input.bool(true, "TP1", inline="222", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+TP2 = input.bool(false, "TP2", inline="222", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+TP3 = input.bool(false, "TP3", inline="222", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+TP4 = input.bool(false, "TP4", inline="222", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+TP5 = input.bool(false, "TP5", inline="222", group="𝙏𝙖𝙠𝙚 𝙋𝙧𝙤𝙛𝙞𝙩 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨")
+
+// The 'takeProfitDistance' represents the percentage distance between the entry price and each take profit (TP) level.
+// Each TP is calculated as a multiple of the base distance. 
+// For example, if 'takeProfitDistance' is set to 1%, TP1 will be 1% above the entry price, 
+// TP2 will be 2% above the entry price, and so on.
+// The calculations below multiply the base distance to determine the target percentage for each TP level.
+ATP5 = takeProfitDistance * 5  
+ATP4 = takeProfitDistance * 4  
+ATP3 = takeProfitDistance * 3 
+ATP2 = takeProfitDistance * 2 
+ATP1 = takeProfitDistance * 1 
+
+TP11 = enableTakeProfit and TP1 ? '{"idx":1,"amount":"' + str.tostring(sizePerTarget) + '","takeProfitPercent":"' + str.tostring(ATP1) + '"}' : na
+TP22 = enableTakeProfit and TP2 ? '{"idx":2,"amount":"' + str.tostring(sizePerTarget) + '","takeProfitPercent":"' + str.tostring(ATP2) + '"}' : na
+TP33 = enableTakeProfit and TP3 ? '{"idx":3,"amount":"' + str.tostring(sizePerTarget) + '","takeProfitPercent":"' + str.tostring(ATP3) + '"}' : na
+TP44 = enableTakeProfit and TP4 ? '{"idx":4,"amount":"' + str.tostring(sizePerTarget) + '","takeProfitPercent":"' + str.tostring(ATP4) + '"}' : na
+TP55 = enableTakeProfit and TP5 ? '{"idx":5,"amount":"' + str.tostring(sizePerTarget) + '","takeProfitPercent":"' + str.tostring(ATP5) + '"}' : na
+
+comma1 = not TP1 ? na : ","
+comma2 = TP2 ? "," : na
+comma3 = TP3 ? "," : na
+comma4 = TP4 ? "," : na
+
+//=== Example: Dynamic Take-Profit Calculation for Long Trades ===//
+// This block demonstrates how the strategy can handle take-profit (TP) calculations dynamically for long trades.
+// In this example, the take profits are based on the closing price and a fixed percentage above the entry price.
+// If the take-profit type is set to 'Absolute', each TP level is calculated by adding a fixed percentage to the 
+// close price (e.g., TP1 = 1% above close, TP2 = 2%, etc.).
+//
+// The example generates JSON commands with specific target prices for each TP level, which can be sent to TV-Hub.
+// These target prices are calculated as absolute values.
+//
+// Strategy developers can modify this section to apply their own logic for target calculation, 
+// such as using volatility-based targets, custom risk-reward ratios, or other price levels.
+// This example focuses only on long trades, and similar logic can be applied to short trades by adjusting the formula.
+
+if (takeProfitType == "Absolute")
+    ATP5 := math.round_to_mintick(close + 0.05 * close)   // TP5 is 5% above the close price
+    ATP4 := math.round_to_mintick(close + 0.04 * close)   // TP4 is 4% above the close price
+    ATP3 := math.round_to_mintick(close + 0.03 * close)   // TP3 is 3% above the close price
+    ATP2 := math.round_to_mintick(close + 0.02 * close)   // TP2 is 2% above the close price
+    ATP1 := math.round_to_mintick(close + 0.01 * close)   // TP1 is 1% above the close price
+
+    // JSON commands for each take profit level with the calculated absolute target prices
+    TP11 := enableTakeProfit and TP1 ? '{"idx":1,"amount":"' + str.tostring(sizePerTarget) + '","price":"' + str.tostring(ATP1) + '"}' : na
+    TP22 := enableTakeProfit and TP2 ? '{"idx":2,"amount":"' + str.tostring(sizePerTarget) + '","price":"' + str.tostring(ATP2) + '"}' : na
+    TP33 := enableTakeProfit and TP3 ? '{"idx":3,"amount":"' + str.tostring(sizePerTarget) + '","price":"' + str.tostring(ATP3) + '"}' : na
+    TP44 := enableTakeProfit and TP4 ? '{"idx":4,"amount":"' + str.tostring(sizePerTarget) + '","price":"' + str.tostring(ATP4) + '"}' : na
+    TP55 := enableTakeProfit and TP5 ? '{"idx":5,"amount":"' + str.tostring(sizePerTarget) + '","price":"' + str.tostring(ATP5) + '"}' : na
+
+TakeProfit = str.tostring(TP11) + str.tostring(comma1) + str.tostring(TP22) + str.tostring(comma2) + str.tostring(TP33) + str.tostring(comma3) + str.tostring(TP44) + str.tostring(comma4) + str.tostring(TP55)
+TPSSET = enableTakeProfit ? ',"targets":[' + str.tostring(TakeProfit) + '],"targetType":"' + str.lower(takeProfitType) + '","targetAmountInPercent":' + str.tostring(targetAmountInPercent) + '' : na 
+
+// ============ Stop Loss Settings ======================
+
+stopLossType = input.string("Percent", "⚙️ Stop-Loss Type", options=["Percent", "Absolute"], group="𝙎𝙩𝙤𝙥 𝙇𝙤𝙨𝙨 𝙖𝙣𝙙 𝙏𝙧𝙖𝙞𝙡𝙞𝙣𝙜 𝙎𝙩𝙤𝙥", tooltip="Select the stop-loss type. 'Percent' calculates the stop-loss as a percentage of the entry price, while 'Absolute' requires a manually calculated stop-loss price to be provided by the strategy.")
+SL = input.bool(true, "Enable Stop-Loss", inline="223", tooltip="If enabled, the stop-loss will be applied. When 'Percent' is selected as the stop-loss type, you must provide the stop-loss percentage. If 'Absolute' is selected, the field can be left empty, and the strategy will calculate the stop-loss price at runtime.", group="𝙎𝙩𝙤𝙥 𝙇𝙤𝙨𝙨 𝙖𝙣𝙙 𝙏𝙧𝙖𝙞𝙡𝙞𝙣𝙜 𝙎𝙩𝙤𝙥")
+stopLossPercentValue = input.float(title="", step=0.1, defval=0.3, minval=0.01, inline="223", group="𝙎𝙩𝙤𝙥 𝙇𝙤𝙨𝙨 𝙖𝙣𝙙 𝙏𝙧𝙖𝙞𝙡𝙞𝙣𝙜 𝙎𝙩𝙤𝙥") 
+stoploss = SL ? ',"stopLossPercent":' + str.tostring(stopLossPercentValue) + ',"stopLossType":"' + str.lower(stopLossType) + '"' : na
+
+//=== Example: Dynamic Stop-Loss Calculation for Long Trades ===//
+// This block demonstrates how to calculate the stop-loss dynamically for long trades.
+// If the stop-loss type is set to 'Absolute', the stop-loss price is calculated as 
+// 2% below the current close price (i.e., stopLossPrice = close - 2% of the close).
+//
+// The example generates a JSON field for the stop-loss, using the calculated stop-loss 
+// price if enabled.
+//
+// Strategy developers can modify this section to implement their own stop-loss logic,
+// such as using volatility-based stop-losses, custom thresholds, or more complex price calculations.
+if (stopLossType == "Absolute")
+    stopLossPrice = math.round_to_mintick(close - 0.02 * close) // For long trades, stop-loss is 2% below the close price
+
+    // JSON stop-loss field, using the calculated stop-loss value
+    stoploss := SL ? ',"stopLoss":' + str.tostring(stopLossPercentValue) + ',"stopLossType":"' + str.lower(stopLossType) + '"' : na
+
+// ==== Trailing Stop Settings ====
+trailing = input.bool(false, "Enabled Trailing", inline="break", group="𝙎𝙩𝙤𝙥 𝙇𝙤𝙨𝙨 𝙖𝙣𝙙 𝙏𝙧𝙖𝙞𝙡𝙞𝙣𝙜 𝙎𝙩𝙤𝙥")  
+stopValue = input.float(title="", step=0.1, defval=0.3, minval=0.01, maxval=100, inline="break", group="𝙎𝙩𝙤𝙥 𝙇𝙤𝙨𝙨 𝙖𝙣𝙙 𝙏𝙧𝙖𝙞𝙡𝙞𝙣𝙜 𝙎𝙩𝙤𝙥", tooltip="When trailing is activated, a trailing stop order is executed. The stop-loss will be automatically updated by the exchange as the price moves in your favor based on the threshold percentage provided. For example, if the trailing threshold is 3% and the price rises by 3% from your entry, the exchange will begin adjusting your stop-loss. Note: your leverage does not affect the trailing stop; it is based purely on the price movement in percentage terms.")
+enableBreakEven = input.bool(false, "Enabled Break Even", tooltip="When this option is active, TV-Hub will execute a regular stop-loss order and monitor it. Once the price reaches the defined threshold, the stop-loss will automatically move to your entry price (break even). Note: This feature is not supported on all exchanges. Please refer to the documentation for exchange compatibility.", group="𝙎𝙩𝙤𝙥 𝙇𝙤𝙨𝙨 𝙖𝙣𝙙 𝙏𝙧𝙖𝙞𝙡𝙞𝙣𝙜 𝙎𝙩𝙤𝙥")
+setBreakEven = enableBreakEven ? ',"stopLossToBreakEven":true,"cancelAllDcaOrders":true' : na
+trailingSet = trailing ? ',"useTrailingStopLoss":true,"trailingStopLossPercent":"' + str.tostring(stopValue) + '"' + str.tostring(setBreakEven) + '' : na
+
+// ================== DCA Settings ===============
+
+enableDca = input(false, "Enable DCA (Order-Mesh)", inline = "dca" , tooltip = "Enable DCA (Dollar Cost Averaging) to build an order mesh that captures price wicks or allows DCA. Set the percentage range from your entry/first order and specify the number of trades. The system will evenly distribute your initial order size across the number of orders. Refer to the docs (chapter 1.6) for detailed examples.",group = " 𝙐𝙨𝙚 𝘿𝘾𝘼 (𝙊𝙧𝙙𝙚𝙧-𝙈𝙚𝙨𝙝)")
+dcaPercent = input.float(title='', step=0.1, defval=0.4, minval = 0.1 , inline = "dca" , group = " 𝙐𝙨𝙚 𝘿𝘾𝘼 (𝙊𝙧𝙙𝙚𝙧-𝙈𝙚𝙨𝙝)"  )
+dcaOrderCount = input.float(step=1, defval=3, minval = 1, maxval = 10 , title = "⚙️ Enter DCA Orders" , inline = "grid", group = " 𝙐𝙨𝙚 𝘿𝘾𝘼 (𝙊𝙧𝙙𝙚𝙧-𝙈𝙚𝙨𝙝)" , tooltip = "Specify the number of DCA (Dollar Cost Averaging) orders to be placed. These orders will be evenly distributed within the defined price range." )
+setDca = enableDca ? ',"useDca":"true","dcaOrderCount":"' + str.tostring(dcaOrderCount) + '","dcaPercent":' + str.tostring(dcaPercent) + ''  : na
+
+// === Advance Settings =====
+
+closeCurrentPosition = input.bool(true, "Close Current Position", tooltip="If enabled, any open position in the opposite direction will be closed. This is useful for flipping positions (e.g., from LONG to SHORT) before opening a new trade.", group="𝘼𝙙𝙫𝙖𝙣𝙘𝙚𝙙 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨" )
+closeSet = closeCurrentPosition ? ',"closeCurrentPosition":true' : na
+
+preventPyramiding = input.bool(false, "Prevent Pyramiding", tooltip="If enabled, new signals in the same direction will be ignored if a position is already open. This prevents pyramiding (adding to an existing position).", group="𝘼𝙙𝙫𝙖𝙣𝙘𝙚𝙙 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨" )
+pyramidingSet = preventPyramiding ? ',"preventPyramiding":true' : na
+
+cancelPendingOrders = input.bool(true, "Cancel Pending Orders", tooltip="If enabled, all pending orders (limit and stop-loss orders) will be canceled before executing the new trade.", group="𝘼𝙙𝙫𝙖𝙣𝙘𝙚𝙙 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨" )
+canSet = cancelPendingOrders ? ',"cancelAllOrders":true' : na
+
+hedge = input(false, "Hedge Mode" , "Enable hedge mode to allow opening both long and short positions simultaneously. This feature is available on Binance-Futures and requires hedge mode to be activated in your Binance account settings." ,  group = "𝘼𝙙𝙫𝙖𝙣𝙘𝙚𝙙 𝙎𝙚𝙩𝙩𝙞𝙣𝙜𝙨" )
+hedgeset = hedge ? ',"hedgeMode":true' : na
+
+//================== Automated Command Construction =================//
+// When an alert triggers, this section generates a command in JSON format.
+// The command is sent to the TV-Hub platform, where it gets executed based on
+// the provided trade settings like leverage, margin, take profit, and stop loss.
+// The command includes the asset pair, position size (in units or percent),
+// trade direction (buy/sell), risk parameters, and advanced options such as 
+// closing positions and handling DCA orders.
+
+buy_command = '{"pair":"' + str.tostring(Currency) + '","' + str.tostring(unitsTypeKey) + '":"' + str.tostring(units) + '","unitsType":"' + str.tostring(unitsTypeValue) + '","exchange":"' + str.tostring(exchangeName) + '","apiKey":"' + str.tostring(apiName) + '","token":"' + str.tostring(token) + '","isBuy":true' + str.tostring(setOrderType) + ',"leverage":"' + str.tostring(Leverage) + '","marginType":"' + str.tostring(margin) + '"' + str.tostring(stoploss) + '' + str.tostring(trailingSet) + '' + str.tostring(setDca) + ' ' + str.tostring(TPSSET) + ' ' + str.tostring(closeSet) + '' + str.tostring(pyramidingSet) + '' + str.tostring(canSet) + '' + str.tostring(hedgeset) + '' +  str.tostring(fixedprice) + ',"alertTimestamp":"' + syminfo.ticker + '-' + str.tostring(time) + '"}'
+sell_command = '{"pair":"' + str.tostring(Currency) + '","' + str.tostring(unitsTypeKey) + '":"' + str.tostring(units) + '","unitsType":"' + str.tostring(unitsTypeValue) + '","exchange":"' + str.tostring(exchangeName) + '","apiKey":"' + str.tostring(apiName) + '","token":"' + str.tostring(token) + '","isSell":true' + str.tostring(setOrderType) + ',"leverage":"' + str.tostring(Leverage) + '","marginType":"' + str.tostring(margin) + '"' + str.tostring(stoploss) + '' + str.tostring(trailingSet) + '' + str.tostring(setDca) + ' ' + str.tostring(TPSSET) + ' ' + str.tostring(closeSet) + '' + str.tostring(pyramidingSet) + '' + str.tostring(canSet) + '' + str.tostring(hedgeset) + '' +  str.tostring(fixedprice) + ',"alertTimestamp":"' + syminfo.ticker + '-' + str.tostring(time) + '"}'
+close_command = '{"pair":"' + str.tostring(Currency) + '","exchange":"' + str.tostring(exchangeName) + '","apiKey":"' + str.tostring(apiName) + '","token":"' + str.tostring(token) + '","isClose":true,"alertTimestamp":"' + syminfo.ticker + '-' + str.tostring(time) + '"}'
+
+// For debugging purposes: To execute one of the trade commands, 
+// uncomment the lines below. Create an alert on TradingView 
+// and leave the message window empty.
+//if barstate.islast
+    //alert(buy_command, alert.freq_once_per_bar)
+
+//==============================================================================//
+//======================= End TV-Hub Input Settings ============================//
+//==============================================================================//
+
+//==============================================================================//
+// The following strategy is just for demonstration purpose. 
+// Start to build your own trade logic here.
+//=========================|====|====|====|====|====|===========================//
+//=========================v====v====v====v====v====v===========================//
+
+
+// Parabolic SAR
+showPSAR = input.bool(title="Show Parabolic SAR", defval=true, group="Parabolic SAR (End of TV-Hub settings)")
+start = input.float(title="Start", step=0.001, defval=0.02, group="Parabolic SAR (End of TV-Hub settings)")
+increment = input.float(title="Increment", step=0.001, defval=0.02, group="Parabolic SAR (End of TV-Hub settings)")
+maximum = input.float(title="Maximum", step=0.01, defval=0.2, group="Parabolic SAR (End of TV-Hub settings)")
+width = input.int(title="Point Width", minval=1, defval=2, group="Parabolic SAR (End of TV-Hub settings)")
+highlightStartPoints = input.bool(title="Highlight Start Points ?", defval=true, group="Parabolic SAR (End of TV-Hub settings)")
+showLabels = input.bool(title="Show Buy/Sell Labels ?", defval=true, group="Parabolic SAR (End of TV-Hub settings)")
+highlightState = input.bool(title="Highlight State ?", defval=true, group="Parabolic SAR (End of TV-Hub settings)")
+
+// Regression channels
+// showRegressionChannels = input.bool(title="Show Regression channels", defval=true, group="Regression channels")
+src = input.source(title="Source", defval=close, group="Regression channels")
+len = input.int(title="Length", defval=100, minval=3, group="Regression channels")
+mult = input.float(title="Channel Multiplier", defval=2, minval=0.1, group="Regression channels")
+showinterval = input.bool(title="Show Channel", defval=true, group="Regression channels")
+showhist = input.bool(title="Show Historical Broken Channels", defval=true, group="Regression channels")
+showresult = input.bool(title="Print Slope", defval=true, group="Regression channels")
+lw = input.int(title="Line Width", defval=2, group="Regression channels")
+colup = input.color(title="Color When Up", defval=color.green, group="Regression channels")
+coldw = input.color(title="Color When Down", defval=color.red, group="Regression channels")
+colbr = input.color(title="Color Of Broken Channel", defval=color.silver, group="Regression channels")
+extendln = input.bool(title="Extend Line", defval=true, group="Regression channels")
+
+// Supertrend
+showSuperTrend = input.bool(title="Show", defval=false, group="Supertrend")
+atrPeriod = input.int(10, "ATR Length", group="Supertrend")
+factor = input.int(3, "Factor", group="Supertrend")
+
+// -- INPUT END --
+
+// -- Parabolic SAR --
+
+var float takeProfit = na
+var float stopLoss = na
+
+psar = ta.sar(start, increment, maximum)
+dir = psar < close ? 1 : -1
+
+psarColor = dir == 1 ? #3388bb : #fdcc02
+psarPlot = plot(showPSAR ? psar : na, title="PSAR", style=plot.style_circles, linewidth=width, color=psarColor)
+
+var color longColor = color.green
+var color shortColor = color.red
+
+buySignal = dir == 1 and dir[1] == -1
+sellSignal = dir == -1 and dir[1] == 1
+
+plotshape(buySignal and showLabels and showPSAR ? psar : na, title="Buy Label", text="B", location=location.absolute, style=shape.labelup, size=size.small, color=longColor, textcolor=color.white)
+
+plotshape(sellSignal and showLabels and showPSAR ? psar : na, title="Sell Label", text="S", location=location.absolute, style=shape.labeldown, size=size.small, color=shortColor, textcolor=color.white)
+
+midPricePlot = plot(ohlc4, title="", display=display.none)
+
+fillColor = highlightState ? (dir == 1 ? longColor : shortColor) : na
+fill(midPricePlot, psarPlot, title="Trade State Filling", color=fillColor)
+
+//changeCond = dir != dir[1]
+//if (changeCond)
+    //alert("PSAR has changed direction!", alert.freq_once_per_bar)
+
+// Close by takeprofit
+takeProfitLong_Condition = takeProfitDistance != 0 and strategy.position_size > 0 and ta.crossover(close, takeProfit)
+takeProfitShort_Condition = takeProfitDistance != 0 and strategy.position_size < 0 and ta.crossunder(close, takeProfit)
+
+plotshape(takeProfitLong_Condition, title="Long TakeProfit", style=shape.circle, location=location.abovebar, color=color.yellow, size=size.tiny)
+plotshape(takeProfitShort_Condition, title="Short TakeProfit", style=shape.circle, location=location.belowbar, color=color.yellow, size=size.tiny)
+
+// Close by take-profit
+// Not strictly necessary since the take-profit orders are already set when
+// opening the position. However, we leave this here to demonstrate
+// how a strategy can issue a close command correctly.
+if takeProfitLong_Condition
+    takeProfit := na
+    strategy.close_all(comment="TakeProfit", alert_message = close_command)
+
+// Close by take-profit
+// Not strictly necessary since the take-profit orders are already set when
+// opening the position. However, we leave this here to demonstrate
+// how a strategy can issue a close command correctly.
+if takeProfitShort_Condition
+    takeProfit := na
+    strategy.close_all(comment="TakeProfit", alert_message = close_command)
+
+// Close by stoploss 
+// Not strictly necessary since the stop-loss orders are already set when
+// opening the position. However, we leave this here to demonstrate
+// how a strategy can issue a close command correctly.
+if stopValue != 0 and strategy.position_size > 0 and ta.crossunder(close, stopLoss)
+    stopLoss := na
+    strategy.close_all(comment="StopLoss", alert_message = close_command)
+
+// Close by stoploss 
+// Not strictly necessary since the stop-loss orders are already set when
+// opening the position. However, we leave this here to demonstrate
+// how a strategy can issue a close command correctly.
+if stopValue != 0 and strategy.position_size < 0 and ta.crossover(close, stopLoss)
+    stopLoss := na
+    strategy.close_all(comment="StopLoss", alert_message = close_command)
+
+// Open orders
+if buySignal
+    strategy.entry("Long", strategy.long, alert_message=buy_command)
+    if stopValue > 0
+        takeProfit := close * (1 + takeProfitDistance)
+
+    if stopValue > 0
+        stopLoss := close * (1 - stopValue)
+
+if sellSignal
+    strategy.entry("Short", strategy.short, alert_message=sell_command)
+    if takeProfitDistance > 0
+        takeProfit := close * (1 - takeProfitDistance)
+
+    if stopValue > 0
+        stopLoss := close * (1 + stopValue)
+// -- Parabolic SAR end --
+
+// -- Regression Channels --
+
+getmedianslopes(_n, _y) =>
+    // For each point, get slopes with other data points, and then calculate median
+    // _n :: number of pointstheil
+    // _y :: source time series, e.g. close
+    _S = array.new_float(0)
+    _S1 = array.new_float(0)
+    float _m = 0.0
+    int _ntmp = _n
+    if _n > 2
+        for i = 0 to _n - 1
+            _S1 := array.new_float(0)
+            for j = 0 to _n - 1
+                if i != j
+                    array.push(_S1, (_y[i] - _y[j]) / (j - i))
+            _m := array.median(_S1)
+            array.push(_S, _m)
+    _S
+
+intercepts(_src, _n, _mslope) =>
+    // Get all intercepts (Y - mslope*X)
+    // _n :: number of data points
+    // _mslope :: median slope determined by means of TS model
+    _I = array.new_float(0)
+    if _n > 2
+        for i = 0 to _n - 1
+            array.push(_I, _src[_n - 1 - i] - _mslope * i)
+    _I
+
+truncate(_value, _decimals) =>
+    // For output: Truncates a given float to a certain number of decimals
+    _factor = math.pow(10, _decimals)
+    int(_value * _factor) / _factor
+
+rmsd(_src, _x, _a, _b, _n) =>
+    float _rmsd = 0.0
+    for i = 0 to _n - 1
+        _rmsd := _rmsd + math.pow(_src[i] - _a - _b * (_x - i), 2) / _n
+    math.sqrt(_rmsd)
+
+// --- MAIN ---
+// get estimate only for the last barstate
+if (not showhist) and (not barstate.islast)
+    len := 0
+
+S = getmedianslopes(len, src)
+mslope = array.median(S)
+I = intercepts(src, len, mslope)
+minter = array.median(I)
+
+// apply estimator
+int x1 = bar_index - len
+int x2 = bar_index
+float y1 = minter
+float y2 = minter + mslope * (len - 1)
+
+//estimate prediction interval (as \pm mult*RMSD)
+float rmse = 0.0
+if showhist or barstate.islast
+    for j = 0 to len - 1
+        rmse := rmse + math.pow(src[j] - (minter + mslope * (len - j)), 2) / len
+float dev = mult * math.sqrt(rmse)
+
+// check if prediction interval is broken
+bool isbroken = (src > y2 + dev) or (src < y2 - dev)
+
+// Plot main regression line
+line a = line.new(x1,
+ y1,
+ x2,
+ y2,
+ xloc = xloc.bar_index,
+ extend = extendln ? extend.right : extend.none,
+ color = mslope > 0 ? colup : coldw,
+ width = lw)
+line.delete(a[1])
+
+// Plot upper prediction interval line
+if showinterval
+    line ap = line.new(x1,
+     y1 + dev,
+     x2,
+     y2 + dev,
+     xloc.bar_index,
+     extend = extendln ? extend.right : extend.none,
+     color = isbroken ? colbr : (mslope > 0 ? colup : coldw),
+     width = lw, style = line.style_dashed)
+    
+    line am = line.new(x1,
+     y1 - dev,
+     x2,
+     y2 - dev,
+     xloc.bar_index,
+     extend = extendln ? extend.right : extend.none,
+     color = isbroken ? colbr : (mslope > 0 ? colup : coldw),
+     width = lw, style = line.style_dashed)
+    
+    line.delete(ap[1])
+    line.delete(am[1])
+if showresult and barstate.islast
+    label b = label.new(bar_index - (len - 1),
+     mslope > 0 ? y1 - dev : y1 + dev,
+     style=mslope > 0 ? label.style_label_up : label.style_label_down,
+     text="Slope " + str.tostring(truncate(mslope, 2)),
+     color=mslope > 0 ? colup : coldw)
+    label.delete(b[1])
+
+// handle the historical breaks
+var int lastsavedbreakbar = 0
+bool iscrossing = false
+if ta.cross(src, y2 + dev)
+    iscrossing := true
+bool histplotcondition = bar_index - int(len * 0.5) > lastsavedbreakbar[1]
+if iscrossing and showhist and histplotcondition
+    line ap_broken = line.new(x1, y1 + dev[1], x2, y2 + dev[1], xloc.bar_index, extend=extend.none, color=colbr, width=1, style=line.style_dashed)
+    line am_broken = line.new(x1, y1 - dev[1], x2, y2 - dev[1], xloc.bar_index, extend=extend.none, color=colbr, width=1, style=line.style_dashed)
+    lastsavedbreakbar := bar_index
+
+// -- SuperTrend --
+
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+bodyMiddle = plot(showSuperTrend ? (open + close) / 2 : na, display=display.none)
+upTrend = plot(showSuperTrend and direction < 0 ? supertrend : na, "Up Trend", color=color.green, style=plot.style_linebr)
+downTrend = plot(showSuperTrend and direction > 0 ? supertrend : na, "Down Trend", color=color.red, style=plot.style_linebr)
